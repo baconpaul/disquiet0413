@@ -1,5 +1,6 @@
 #include <iostream>
 #include <iomanip>
+#include <map>
 #include <unordered_set>
 
 /*
@@ -54,6 +55,7 @@ struct ConstantPitch : public Pitch
     }
     virtual double dphase() override { return dp; }
     virtual void step() override {}
+    virtual bool isActive() override { return true; }
 };
 
 struct Osc : public Steppable
@@ -90,7 +92,6 @@ struct SinOsc : public Osc {
 
 struct Env : public Steppable
 {
-    virtual double amplitude() = 0;
 };
 
 struct ConstantTimedEnv : public Env {
@@ -98,20 +99,18 @@ struct ConstantTimedEnv : public Env {
     double currtime;
     ConstantTimedEnv( double time, double amp ) : time(time), amp(amp), currtime(0) {
     }
-    virtual double amplitude() override { return amp; }
     virtual bool isActive() override { return currtime < time; };
     virtual void step() override { currtime += stime; }
+    virtual double value() override { return amp; } 
 };
 
 struct Note : public Steppable
 {
     std::shared_ptr<Osc> source;
     std::shared_ptr<Env> env;
-    Note( std::shared_ptr<Pitch> ipitch,
-          std::shared_ptr<Osc> isource,
+    Note( std::shared_ptr<Osc> isource,
           std::shared_ptr<Env> ienvelope ) {
         source = isource;
-        source->setPitch(ipitch);
         env = ienvelope;
 
         children.insert(source);
@@ -121,7 +120,7 @@ struct Note : public Steppable
     virtual void step() override {
         auto ns = source->value();
         auto en = env->value();
-
+        
         val = en * ns;
     }
 
@@ -129,8 +128,69 @@ struct Note : public Steppable
         return env->isActive();
     }
 };
+
+struct Player {
+    std::map<size_t, std::shared_ptr<Note>> sequence;
     
+    void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
+        sequence[sample] = n;
+    }
+    void addNoteAtTime(float time, std::shared_ptr<Note> n) {
+        auto sample = (size_t)( time * srate );
+        sequence[sample] = n;
+    }
+
+    void generateSamples( double *s, size_t nsamples ) {
+        std::unordered_set<std::shared_ptr<Note>> activeNotes;
+
+        for( auto cs = 0; cs < nsamples; ++cs )
+        {
+            auto maybenrenote = sequence.find(cs);
+            if( maybenrenote != sequence.end() )
+            {
+                activeNotes.insert( maybenrenote->second );
+            }
+
+            for( auto n : activeNotes )
+                n->makeDirty();
+            for( auto n : activeNotes )
+                n->stepIfDirty();
+
+            double res = 0;
+            for( auto n : activeNotes )
+                res += n->value();
+            s[cs] = res;
+        }
+    }
+};
+
 int main( int arcgc, char **argv )
 {
     std::cout << "Disquiet 0413" << std::endl;
+    Player p;
+
+    std::shared_ptr<Env> e( new ConstantTimedEnv( 2.0, 0.4 ));
+    std::shared_ptr<Pitch> ptc(new ConstantPitch(440.0));
+    std::shared_ptr<Osc> o(new SinOsc());
+    o->setPitch(ptc);
+    std::shared_ptr<Note> n(new Note( o, e ));
+    
+    p.addNoteAtTime(0, n);
+
+    size_t nsamp = 2 * srate;
+    double music[ nsamp ];
+    p.generateSamples(music, nsamp );
+
+
+    SF_INFO sfinfo;
+    sfinfo.channels = 1;
+    sfinfo.samplerate = srate;
+    sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+    SNDFILE* of = sf_open("example.wav", SFM_WRITE, &sfinfo);
+    float sfm[ nsamp ];
+    for( auto i=0; i<nsamp; ++i )
+        sfm[i] = music[i];
+    sf_write_float( of, &sfm[0], nsamp );
+    sf_write_sync(of);
+    sf_close(of);
 }
