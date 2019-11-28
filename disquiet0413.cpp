@@ -160,6 +160,14 @@ struct Player {
             for( auto n : activeNotes )
                 res += n->value();
             s[cs] = res;
+
+            std::unordered_set<std::shared_ptr<Note>> del;
+            for( auto n : activeNotes )
+                if( ! n->isActive() )
+                    del.insert( n );
+            for( auto n : del )
+                activeNotes.erase(n);
+                
         }
     }
 };
@@ -169,13 +177,19 @@ int main( int arcgc, char **argv )
     std::cout << "Disquiet 0413" << std::endl;
     Player p;
 
-    std::shared_ptr<Env> e( new ConstantTimedEnv( 2.0, 0.4 ));
-    std::shared_ptr<Pitch> ptc(new ConstantPitch(440.0));
-    std::shared_ptr<Osc> o(new SinOsc());
-    o->setPitch(ptc);
-    std::shared_ptr<Note> n(new Note( o, e ));
+    auto makeNote = [](double len, double amp, double freq) {
+                        std::shared_ptr<Env> e( new ConstantTimedEnv( len, amp ));
+                        std::shared_ptr<Pitch> ptc(new ConstantPitch(freq));
+                        std::shared_ptr<Osc> o(new SinOsc());
+                        o->setPitch(ptc);
+                        std::shared_ptr<Note> n(new Note( o, e ));
+                        return n;
+                    };
     
-    p.addNoteAtTime(0, n);
+    p.addNoteAtTime(0, makeNote(0.8, 0.3, 440));
+    p.addNoteAtTime(0.4, makeNote(0.8, 0.3, 540));
+    p.addNoteAtTime(0.8, makeNote(0.8, 0.3, 640));
+    p.addNoteAtTime(1.2, makeNote(0.8, 0.3, 880));
 
     size_t nsamp = 2 * srate;
     double music[ nsamp ];
