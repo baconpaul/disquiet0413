@@ -15,8 +15,8 @@ double stime = 1.0 / srate;
 struct Steppable
 {
     virtual void step() = 0;
-    double val;
-    virtual double value() { return val; };
+    virtual int channels() = 0;
+    virtual double value(int chan) = 0;
     virtual bool isActive() = 0;
 
     bool dirty = false;
@@ -42,7 +42,21 @@ struct Steppable
     }
 };
 
-struct Modulator : Steppable
+struct MonoSteppable : public Steppable
+{
+    double val;
+    virtual int channels() override { return 1; }
+    virtual double value(int chan) override { return val; };
+};
+    
+struct StereoSteppable : public Steppable
+{
+    double valL, valR;
+    virtual int channels() override { return 2; }
+    virtual double value(int chan) override { if( chan == 0 ) return valL; else return valR; };
+};
+    
+struct Modulator : MonoSteppable
 {
 };
 
@@ -54,7 +68,7 @@ struct ConstantModulator : Modulator {
 /*
 ** dPhase generators (pitch generators)
 */
-struct Pitch : public Steppable
+struct Pitch : public MonoSteppable
 {
     virtual double dphase() = 0;
 };
@@ -73,7 +87,7 @@ struct ConstantPitch : public Pitch
 /*
 ** Oscillators consume dPhase and make a waveform
 */
-struct Osc : public Steppable
+struct Osc : public StereoSteppable
 {
     virtual bool isActive() override { return true; }
     virtual void setPitch(std::shared_ptr<Pitch> p)
@@ -93,14 +107,15 @@ struct Osc : public Steppable
             dp = pitch->dphase();
         phase += dp;
         if( phase > 1 ) phase -= 1;
-        val = evaluateAtPhase();
+        valL = evaluateAtPhase(0);
+        valR = evaluateAtPhase(1);
     }
 
-    virtual double evaluateAtPhase() = 0;
+    virtual double evaluateAtPhase(int chan) = 0;
 };
 
 struct SinOsc : public Osc {
-    virtual double evaluateAtPhase() override {
+    virtual double evaluateAtPhase(int chan) override {
         return sin( 2.0 * M_PI * phase );
     }
 };
@@ -114,10 +129,10 @@ struct PWMOsc : public Osc {
         pwmModulator = m;
         children.insert( pwmModulator );
     }
-    virtual double evaluateAtPhase() override {
+    virtual double evaluateAtPhase(int chan) override {
         auto pw = 0.5;
         if( pwmModulator )
-            pw = pwmModulator->value();
+            pw = pwmModulator->value(chan);
         // A gross square for now
         auto res = 1.0;
         if( phase > pw )
@@ -129,7 +144,7 @@ struct PWMOsc : public Osc {
 /*
 ** Envelopes
 */
-struct Env : public Steppable
+struct Env : public MonoSteppable
 {
 };
 
@@ -140,7 +155,7 @@ struct ConstantTimedEnv : public Env {
     }
     virtual bool isActive() override { return currtime < time; };
     virtual void step() override { currtime += stime; }
-    virtual double value() override { return amp; } 
+    virtual double value(int chan) override { return amp; } 
 };
 
 struct ADSRHeldForTimeEnv : public Env {
@@ -173,10 +188,10 @@ struct ADSRHeldForTimeEnv : public Env {
         }
         currtime += stime;
     }
-    virtual double value() override { return amp * val; } 
+    virtual double value(int chan) override { return amp * val; } 
 };
 
-struct Note : public Steppable
+struct Note : public StereoSteppable
 {
     std::shared_ptr<Osc> source;
     std::shared_ptr<Env> env;
@@ -190,10 +205,16 @@ struct Note : public Steppable
     }
 
     virtual void step() override {
-        auto ns = source->value();
-        auto en = env->value();
-        
-        val = en * ns;
+        for( auto c=0; c<2; ++c )
+        {
+            auto ns = source->value(c);
+            auto en = env->value(c);
+
+            if( c == 0 )
+                valL = en * ns;
+            else
+                valR = en * ns;
+        }
     }
 
     virtual bool isActive() override {
@@ -215,7 +236,7 @@ struct Player {
     void generateSamples( double *s, size_t nsamples ) {
         std::unordered_set<std::shared_ptr<Note>> activeNotes;
 
-        for( auto cs = 0; cs < nsamples; ++cs )
+        for( auto cs = 0; cs < nsamples; cs += 2 )
         {
             auto maybenrenote = sequence.find(cs);
             if( maybenrenote != sequence.end() )
@@ -228,10 +249,14 @@ struct Player {
             for( auto n : activeNotes )
                 n->stepIfDirty();
 
-            double res = 0;
+            double resL = 0, resR = 0;
             for( auto n : activeNotes )
-                res += n->value();
-            s[cs] = res;
+            {
+                resL += n->value(0);
+                resR += n->value(1);
+            }
+            s[cs] = resL;
+            s[cs+1] = resR;
 
             std::unordered_set<std::shared_ptr<Note>> del;
             for( auto n : activeNotes )
@@ -239,7 +264,6 @@ struct Player {
                     del.insert( n );
             for( auto n : del )
                 activeNotes.erase(n);
-                
         }
     }
 };
@@ -265,7 +289,7 @@ int main( int arcgc, char **argv )
                         return n;
                     };
 
-    auto scale = { 60, 62, 64, 65, 67, 69, 71, 72 };
+    auto scale = { 60, 62, 64, 65, 67, 69, 71, 72, 74 };
     auto s = 0.0;
     for(auto n : scale)
     {
@@ -273,13 +297,13 @@ int main( int arcgc, char **argv )
         s += 0.2;
     }
 
-    size_t nsamp = (size_t)( 2.5 * srate );
+    size_t nsamp = (size_t)( 2 * 2.5 * srate );
     double music[ nsamp ];
     p.generateSamples(music, nsamp );
 
 
     SF_INFO sfinfo;
-    sfinfo.channels = 1;
+    sfinfo.channels = 2;
     sfinfo.samplerate = srate;
     sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
     SNDFILE* of = sf_open("example.wav", SFM_WRITE, &sfinfo);
