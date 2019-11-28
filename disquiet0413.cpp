@@ -214,6 +214,13 @@ struct Player {
     }
 };
 
+float noteToFreq(int n)
+{
+    auto n0 = n - 69; // so 440 == 0
+    auto f = 440.0 * pow( 2.0, n0 / 12.0 );
+    return f;
+}
+
 int main( int arcgc, char **argv )
 {
     std::cout << "Disquiet 0413" << std::endl;
@@ -227,11 +234,14 @@ int main( int arcgc, char **argv )
                         std::shared_ptr<Note> n(new Note( o, e ));
                         return n;
                     };
-    
-    p.addNoteAtTime(0, makeNote(0.8, 0.3, 440));
-    p.addNoteAtTime(0.4, makeNote(0.8, 0.3, 540));
-    p.addNoteAtTime(0.8, makeNote(0.8, 0.3, 640));
-    p.addNoteAtTime(1.2, makeNote(0.8, 0.3, 880));
+
+    auto scale = { 60, 62, 64, 65, 67, 69, 71, 72 };
+    auto s = 0.0;
+    for(auto n : scale)
+    {
+        p.addNoteAtTime(s, makeNote( 0.5, 0.3, noteToFreq(n) ) );
+        s += 0.2;
+    }
 
     size_t nsamp = (size_t)( 2.5 * srate );
     double music[ nsamp ];
