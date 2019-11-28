@@ -42,6 +42,15 @@ struct Steppable
     }
 };
 
+struct Modulator : Steppable
+{
+};
+
+struct ConstantModulator : Modulator {
+    ConstantModulator( double v ) { val = v; }
+    virtual void step() override { }
+};
+
 /*
 ** dPhase generators (pitch generators)
 */
@@ -93,6 +102,27 @@ struct Osc : public Steppable
 struct SinOsc : public Osc {
     virtual double evaluateAtPhase() override {
         return sin( 2.0 * M_PI * phase );
+    }
+};
+
+struct PWMOsc : public Osc {
+    std::shared_ptr<Modulator> pwmModulator;
+    void setPWMModulator( std::shared_ptr<Modulator> m ) {
+        if( pwmModulator )
+            children.erase( pwmModulator );
+        
+        pwmModulator = m;
+        children.insert( pwmModulator );
+    }
+    virtual double evaluateAtPhase() override {
+        auto pw = 0.5;
+        if( pwmModulator )
+            pw = pwmModulator->value();
+        // A gross square for now
+        auto res = 1.0;
+        if( phase > pw )
+            res = -1.0;
+        return res;
     }
 };
 
@@ -229,7 +259,7 @@ int main( int arcgc, char **argv )
     auto makeNote = [](double len, double amp, double freq) {
                         std::shared_ptr<Env> e( new ADSRHeldForTimeEnv( 0.07, 0.05, .9, 0.2, len, amp ));
                         std::shared_ptr<Pitch> ptc(new ConstantPitch(freq));
-                        std::shared_ptr<Osc> o(new SinOsc());
+                        std::shared_ptr<Osc> o(new PWMOsc());
                         o->setPitch(ptc);
                         std::shared_ptr<Note> n(new Note( o, e ));
                         return n;
