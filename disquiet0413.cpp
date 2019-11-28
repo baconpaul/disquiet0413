@@ -42,6 +42,9 @@ struct Steppable
     }
 };
 
+/*
+** dPhase generators (pitch generators)
+*/
 struct Pitch : public Steppable
 {
     virtual double dphase() = 0;
@@ -58,6 +61,9 @@ struct ConstantPitch : public Pitch
     virtual bool isActive() override { return true; }
 };
 
+/*
+** Oscillators consume dPhase and make a waveform
+*/
 struct Osc : public Steppable
 {
     virtual bool isActive() override { return true; }
@@ -90,6 +96,9 @@ struct SinOsc : public Osc {
     }
 };
 
+/*
+** Envelopes
+*/
 struct Env : public Steppable
 {
 };
@@ -102,6 +111,39 @@ struct ConstantTimedEnv : public Env {
     virtual bool isActive() override { return currtime < time; };
     virtual void step() override { currtime += stime; }
     virtual double value() override { return amp; } 
+};
+
+struct ADSRHeldForTimeEnv : public Env {
+    double a, d, s, r;
+    double time, amp;
+    double currtime;
+    ADSRHeldForTimeEnv( double a, double d, double s, double r, double time, double amp ) : time(time), amp(amp), currtime(0),
+                                                                                          a(a), d(d), s(s), r(r) {
+    }
+    virtual bool isActive() override { return currtime < time + r; };
+    virtual void step() override {
+        if( currtime < a )
+        {
+            auto intoA = currtime / a;
+            val = 1.0 * intoA;
+        }
+        else if( currtime < a + d )
+        {
+            auto intoD = (currtime - a) / d;
+            val = ( 1.0 - s ) * ( 1.0 - intoD ) + s;
+        }
+        else if( currtime < time )
+        {
+            val = s;
+        }
+        else
+        {
+            auto intoR = ( currtime - time ) / r; // ( 0 for release, 1 for end)
+            val = s * ( 1 - intoR );
+        }
+        currtime += stime;
+    }
+    virtual double value() override { return amp * val; } 
 };
 
 struct Note : public Steppable
@@ -178,7 +220,7 @@ int main( int arcgc, char **argv )
     Player p;
 
     auto makeNote = [](double len, double amp, double freq) {
-                        std::shared_ptr<Env> e( new ConstantTimedEnv( len, amp ));
+                        std::shared_ptr<Env> e( new ADSRHeldForTimeEnv( 0.07, 0.05, .9, 0.2, len, amp ));
                         std::shared_ptr<Pitch> ptc(new ConstantPitch(freq));
                         std::shared_ptr<Osc> o(new SinOsc());
                         o->setPitch(ptc);
@@ -191,7 +233,7 @@ int main( int arcgc, char **argv )
     p.addNoteAtTime(0.8, makeNote(0.8, 0.3, 640));
     p.addNoteAtTime(1.2, makeNote(0.8, 0.3, 880));
 
-    size_t nsamp = 2 * srate;
+    size_t nsamp = (size_t)( 2.5 * srate );
     double music[ nsamp ];
     p.generateSamples(music, nsamp );
 
