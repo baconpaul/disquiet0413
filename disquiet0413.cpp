@@ -326,13 +326,14 @@ struct Filter : StereoSteppable
         input = i;
         children.insert(i);
     }
+    virtual bool isActive() { return input->isActive(); }
 };
 
-#if 0
-strict BiquadFilter : Filter // Thanks to http://shepazu.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+struct BiquadFilter : Filter // Thanks to http://shepazu.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
 {
-    float inp[3], out[3];
-    float b[3], a[3];
+    double freq = 200, Q = 0.2;
+    double inp[2][3], out[2][3];
+    double b[3], a[3];
     BiquadFilter() {
         resetBuffers();
     }
@@ -340,51 +341,75 @@ strict BiquadFilter : Filter // Thanks to http://shepazu.github.io/Audio-EQ-Cook
     void resetBuffers() {
         for( auto i=0; i<3; ++i )
         {
-            inp[i] = 0.;
-            out[i] = 0.;
+            inp[0][i] = 0.;
+            out[0][i] = 0.;
+            inp[1][i] = 0.;
+            out[1][i] = 0.;
         }
     }
     
     virtual void step() {
-        for( auto i=0; i<2; ++i )
+        for( auto chan=0; chan < 2; ++chan )
         {
-            inp[i+1] = inp[i];
-            out[i+1] = out[i];
-        }
-        inp[0] = input->value();
-
-        double res;
-        for( int i=0; i<3; ++i )
-        {
-            res += b[i] * inp[i];
-            if( i != 0 )
-                res += a[i] * out[i];
-        }
-        out[0] = res;
-        val = res;
+            for( auto i=0; i<2; ++i )
+            {
+                inp[chan][i+1] = inp[chan][i];
+                out[chan][i+1] = out[chan][i];
+            }
+            inp[chan][0] = input->value(chan);
+            
+            double res = 0.0;
+            for( int i=0; i<3; ++i )
+            {
+                res += b[i] * inp[chan][i];
+                if( i != 0 )
+                    res -= a[i] * out[chan][i];
+            }
+            out[chan][0] = res;
+        };
+        valL = out[0][0];
+        valR = out[1][1];
     }
 
-    void LPF( double freq, double Q )
+    void setFreq( double f )
     {
-        auto alpha = sin(freq) / ( 2.0 * Q );
-        auto cosw  = cos(freq);
+        freq = f;
+        recalcCoeffs();
+    }
+
+    void setResonance( double q )
+    {
+        Q = q;
+        recalcCoeffs();
+    }
+
+    virtual void recalcCoeffs() = 0;
+    
+};
+
+struct LPFBiquad : BiquadFilter {
+    virtual void recalcCoeffs() override
+    {
+        auto omega = 2.0 * M_PI * freq / srate;
+        auto alpha = sin(omega) / ( 2.0 * Q );
+        auto cosw  = cos(omega);
         auto a0 = 1 + alpha;
         
         b[0] = ( 1.0 - cosw ) / 2.0 / a0;
-        b[1] = ( 1.0 - cos2 ) / a0;
+        b[1] = ( 1.0 - cosw ) / a0;
         b[2] = b[0];
-        a[1] = ( - 2.0 * cos2 ) / a0;
+        a[1] = ( - 2.0 * cosw ) / a0;
         a[2] = ( 1.0 - alpha ) / a0;
+
     }
-}
-#endif
+};
 
 
 struct Note : public StereoSteppable
 {
-    std::shared_ptr<Osc> source;
+    std::shared_ptr<StereoSteppable> source;
     std::shared_ptr<Env> env;
-    Note( std::shared_ptr<Osc> isource,
+    Note( std::shared_ptr<StereoSteppable> isource,
           std::shared_ptr<Env> ienvelope ) {
         source = isource;
         env = ienvelope;
@@ -419,7 +444,7 @@ struct Player {
     void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
         sequence[sample] = n;
     }
-    void addNoteAtTime(float time, std::shared_ptr<Note> n) {
+    void addNoteAtTime(double time, std::shared_ptr<Note> n) {
         auto sample = (size_t)( time * srate );
         sequence[sample] = n;
     }
@@ -459,7 +484,7 @@ struct Player {
     }
 };
 
-float noteToFreq(int n)
+double noteToFreq(int n)
 {
     auto n0 = n - 69; // so 440 == 0
     auto f = 440.0 * pow( 2.0, n0 / 12.0 );
@@ -491,7 +516,21 @@ int runDisquiet0413()
                         
                         o->children.insert(b);
 
-                        auto n = std::make_shared<Note>( o, e );
+                        auto lpf = std::make_shared<LPFBiquad>();
+                        lpf->setFreq(4000);
+                        lpf->setResonance(0.7);
+                        lpf->setInput(o);
+                        std::weak_ptr<LPFBiquad> wlpf = lpf;
+                        auto lb = std::make_shared<ModulatorBinder>(lfo,
+                                                                    [wlpf](double v)
+                                                                        {
+                                                                            wlpf.lock()->setFreq(4000 + v * 3000 );
+                                                                        }
+                            );
+                        lpf->children.insert(lb);
+                          
+                        
+                        auto n = std::make_shared<Note>( lpf, e );
 
                         return n;
                     };
