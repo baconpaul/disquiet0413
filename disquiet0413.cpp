@@ -63,7 +63,41 @@ struct Modulator : MonoSteppable
 struct ConstantModulator : Modulator {
     ConstantModulator( double v ) { val = v; }
     virtual void step() override { }
+    virtual bool isActive() override { return true; }
 };
+
+struct LFOSin : Modulator {
+    double freq, phase, dphase;
+    LFOSin( double freq ) {
+        freq = freq;
+        phase = 0;
+        dphase = freq / srate;
+    }
+    virtual void step() override {
+        phase += dphase;
+        val = sin( phase );
+    }
+    virtual bool isActive() override { return true; }
+};
+
+struct ModulatorBinder : Modulator {
+    std::shared_ptr<MonoSteppable> mod;
+    std::function<void(double)> toThis;
+    ModulatorBinder( std::shared_ptr<Modulator> mod,
+                     std::function<void(double)> toThis ) {
+        this->mod = mod;
+        this->toThis = toThis;
+        children.insert(this->mod);
+    }
+
+    virtual void step() override {
+        toThis(mod->value(0));
+    }
+    virtual bool isActive() override {
+        return mod->isActive();
+    }
+};
+    
 
 /*
 ** dPhase generators (pitch generators)
@@ -121,19 +155,9 @@ struct SinOsc : public Osc {
 };
 
 struct PWMOsc : public Osc {
-    std::shared_ptr<Modulator> pwmModulator;
-    void setPWMModulator( std::shared_ptr<Modulator> m ) {
-        if( pwmModulator )
-            children.erase( pwmModulator );
-        
-        pwmModulator = m;
-        children.insert( pwmModulator );
-    }
+    double pw;
+    virtual void setPulseWidth( double pw ) { this->pw = pw; }
     virtual double evaluateAtPhase(int chan) override {
-        auto pw = 0.5;
-        if( pwmModulator )
-            pw = pwmModulator->value(chan);
-        // A gross square for now
         auto res = 1.0;
         if( phase > pw )
             res = -1.0;
@@ -144,7 +168,7 @@ struct PWMOsc : public Osc {
 /*
 ** Envelopes
 */
-struct Env : public MonoSteppable
+struct Env : public Modulator
 {
 };
 
@@ -190,6 +214,69 @@ struct ADSRHeldForTimeEnv : public Env {
     }
     virtual double value(int chan) override { return amp * val; } 
 };
+
+struct Filter : StereoSteppable
+{
+    std::shared_ptr<StereoSteppable> input;
+    void setInput(std::shared_ptr<StereoSteppable> i) {
+        if( input )
+            children.erase(input);
+        input = i;
+        children.insert(input);
+    }
+};
+
+#if 0
+strict BiquadFilter : Filter // Thanks to http://shepazu.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html
+{
+    float inp[3], out[3];
+    float b[3], a[3];
+    BiquadFilter() {
+        resetBuffers();
+    }
+
+    void resetBuffers() {
+        for( auto i=0; i<3; ++i )
+        {
+            inp[i] = 0.;
+            out[i] = 0.;
+        }
+    }
+    
+    virtual void step() {
+        for( auto i=0; i<2; ++i )
+        {
+            inp[i+1] = inp[i];
+            out[i+1] = out[i];
+        }
+        inp[0] = input->value();
+
+        double res;
+        for( int i=0; i<3; ++i )
+        {
+            res += b[i] * inp[i];
+            if( i != 0 )
+                res += a[i] * out[i];
+        }
+        out[0] = res;
+        val = res;
+    }
+
+    void LPF( double freq, double Q )
+    {
+        auto alpha = sin(freq) / ( 2.0 * Q );
+        auto cosw  = cos(freq);
+        auto a0 = 1 + alpha;
+        
+        b[0] = ( 1.0 - cosw ) / 2.0 / a0;
+        b[1] = ( 1.0 - cos2 ) / a0;
+        b[2] = b[0];
+        a[1] = ( - 2.0 * cos2 ) / a0;
+        a[2] = ( 1.0 - alpha ) / a0;
+    }
+}
+#endif
+
 
 struct Note : public StereoSteppable
 {
@@ -280,15 +367,25 @@ int main( int arcgc, char **argv )
     std::cout << "Disquiet 0413" << std::endl;
     Player p;
 
-    auto makeNote = [](double len, double amp, double freq) {
+    auto makeNote = [&p](double len, double amp, double freq) {
                         std::shared_ptr<Env> e( new ADSRHeldForTimeEnv( 0.07, 0.05, .9, 0.2, len, amp ));
                         std::shared_ptr<Pitch> ptc(new ConstantPitch(freq));
-                        std::shared_ptr<Osc> o(new PWMOsc());
+                        std::shared_ptr<PWMOsc> o(new PWMOsc());
                         o->setPitch(ptc);
+
+                        std::shared_ptr<LFOSin> lfo(new LFOSin( 8.0 ));
+                        std::shared_ptr<ModulatorBinder> b(new ModulatorBinder(lfo,
+                                                                               [o](double v) {
+                                                                                   auto npw = 0.5 + 0.3 * v;
+                                                                                   o->setPulseWidth(npw);
+                                                                               } ) );
+                        o->children.insert(b);
+                        
                         std::shared_ptr<Note> n(new Note( o, e ));
                         return n;
                     };
 
+    #if 0
     auto scale = { 60, 62, 64, 65, 67, 69, 71, 72, 74 };
     auto s = 0.0;
     for(auto n : scale)
@@ -296,6 +393,10 @@ int main( int arcgc, char **argv )
         p.addNoteAtTime(s, makeNote( 0.5, 0.3, noteToFreq(n) ) );
         s += 0.2;
     }
+    #endif
+
+    p.addNoteAtTime( 0.0, makeNote( 1.8, 0.3, noteToFreq(48) ) );
+    // p.addNoteAtTime( 0.2, makeNote( 1.8, 0.3, noteToFreq(48 + 5) ) );
 
     size_t nsamp = (size_t)( 2 * 2.5 * srate );
     double music[ nsamp ];
