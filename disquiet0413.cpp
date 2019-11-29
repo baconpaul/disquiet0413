@@ -1,7 +1,10 @@
 #include <iostream>
 #include <iomanip>
+#include <vector>
 #include <map>
 #include <unordered_set>
+#include <atomic>
+#include <typeinfo>
 
 /*
 ** The only thing I use which isn't std c++14 is libsndfile just because
@@ -12,13 +15,29 @@
 double srate = 44100;
 double stime = 1.0 / srate;
 
+static std::atomic<int> steppableCount;
+
 struct Steppable
 {
+    Steppable() {
+        steppableCount++;
+        std::cout << "Steppable ctor:  [" << steppableCount << "] [" << this << "]" << std::endl;
+    }
+    ~Steppable() {
+        steppableCount--;
+        std::cout << "Steppable dtor:  [" << steppableCount << "] [" << this << "]" << std::endl;
+        for( auto c : children )
+        {
+            std::cout << "  - " << c.get() << " " << c.use_count() << " " << c->className() << std::endl;
+        }
+        children.clear();
+    }
     virtual void step() = 0;
     virtual int channels() = 0;
     virtual double value(int chan) = 0;
     virtual bool isActive() = 0;
-
+    virtual std::string className() { return "Steppable [override]"; }
+    
     bool dirty = false;
     std::unordered_set<std::shared_ptr<Steppable>> children;
 
@@ -36,9 +55,17 @@ struct Steppable
             c->stepIfDirty();
 
         if( dirty )
+        {
             step();
+        }
         
         dirty = false;
+    }
+
+    void debugInfo(std::string pfx = "|-") {
+        std::cout << pfx << " this=" << this << " " << className() << std::endl;
+        for( auto c : children )
+            c->debugInfo( pfx + "-|-" );
     }
 };
 
@@ -78,6 +105,7 @@ struct LFOSin : Modulator {
         val = sin( phase );
     }
     virtual bool isActive() override { return true; }
+    virtual std::string className() override { return "LFOSin"; }
 };
 
 struct ModulatorBinder : Modulator {
@@ -87,7 +115,7 @@ struct ModulatorBinder : Modulator {
                      std::function<void(double)> toThis ) {
         this->mod = mod;
         this->toThis = toThis;
-        children.insert(this->mod);
+        children.insert(mod);
     }
 
     virtual void step() override {
@@ -96,6 +124,7 @@ struct ModulatorBinder : Modulator {
     virtual bool isActive() override {
         return mod->isActive();
     }
+    virtual std::string className() override { return "ModluatorBinder"; }
 };
     
 
@@ -116,6 +145,7 @@ struct ConstantPitch : public Pitch
     virtual double dphase() override { return dp; }
     virtual void step() override {}
     virtual bool isActive() override { return true; }
+    virtual std::string className() override { return "ConstantPitch"; }
 };
 
 /*
@@ -155,16 +185,87 @@ struct SinOsc : public Osc {
 };
 
 struct PWMOsc : public Osc {
-    double pw;
+    double pw = 0.5;
+    double falloff = 0.2;
+    
     virtual void setPulseWidth( double pw ) { this->pw = pw; }
     virtual double evaluateAtPhase(int chan) override {
-        auto res = 1.0;
-        if( phase > pw )
-            res = -1.0;
+        double vphase;
+        double s;
+        if( phase < pw )
+        {
+            vphase = phase / pw;
+            s = 1;
+        }
+        else
+        {
+            vphase = (phase - pw) / ( 1.0 - pw );
+            s = -1;
+        }
+        auto res = s * ( falloff * ( vphase * vphase ) + 1.0 - falloff );
+        
         return res;
     }
+
+    virtual std::string className() override { return "PWMOsc"; }
 };
 
+struct UnisonPWMOsc : public Osc {
+    std::vector<std::shared_ptr<PWMOsc>> osces;
+    std::vector<double> pan;
+    int nUni;
+    double spread;
+
+    
+    UnisonPWMOsc( int nUni, double spread ) {
+        this->nUni = nUni;
+        this->spread = spread;
+        auto sphase = 1.0 / nUni;
+        pan.resize(nUni);
+        for( auto i=0; i<nUni; ++i )
+        {
+            osces.push_back( std::make_shared<PWMOsc>() );
+            osces[i]->phase = sphase * i;
+            pan[i] = sphase * ( i + 0.5 );
+        }
+    }
+    
+    virtual void step() override {
+        float dp = 0.01;
+        if( pitch )
+            dp = pitch->dphase();
+
+        // this is a bit inefficient
+        auto freq = dp * srate;
+        auto spreadfreq = freq * spread;
+        auto dfreq = spreadfreq * 2.0 / (nUni - 1);
+        float tvalL = 0;
+        float tvalR = 0;
+        for( auto i=0; i<nUni; ++i )
+        {
+            auto lfreq = freq + dfreq * i - spreadfreq;
+            auto dp = lfreq / srate;
+
+            osces[i]->phase += dp;
+            if( osces[i]->phase > 1 )
+                osces[i]->phase -= 1;
+
+            tvalL += pan[i] * osces[i]->evaluateAtPhase(0) / nUni;
+            tvalR += (1.0 - pan[i] ) * osces[i]->evaluateAtPhase(0) / nUni;
+
+
+        }
+        valL = tvalL;
+        valR = tvalR;
+    }
+
+    virtual double evaluateAtPhase(int c) override {
+        assert(false);
+    }
+
+    virtual std::string className() override { return "UnisonPWMOsc"; }
+};
+    
 /*
 ** Envelopes
 */
@@ -212,7 +313,8 @@ struct ADSRHeldForTimeEnv : public Env {
         }
         currtime += stime;
     }
-    virtual double value(int chan) override { return amp * val; } 
+    virtual double value(int chan) override { return amp * val; }
+    virtual std::string className() override { return "ADSREnv"; }
 };
 
 struct Filter : StereoSteppable
@@ -222,7 +324,7 @@ struct Filter : StereoSteppable
         if( input )
             children.erase(input);
         input = i;
-        children.insert(input);
+        children.insert(i);
     }
 };
 
@@ -287,8 +389,8 @@ struct Note : public StereoSteppable
         source = isource;
         env = ienvelope;
 
-        children.insert(source);
-        children.insert(env);
+        children.insert(isource);
+        children.insert(ienvelope);
     }
 
     virtual void step() override {
@@ -307,11 +409,13 @@ struct Note : public StereoSteppable
     virtual bool isActive() override {
         return env->isActive();
     }
+
+    virtual std::string className() override { return "Note"; }
 };
 
 struct Player {
     std::map<size_t, std::shared_ptr<Note>> sequence;
-    
+
     void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
         sequence[sample] = n;
     }
@@ -362,26 +466,33 @@ float noteToFreq(int n)
     return f;
 }
 
-int main( int arcgc, char **argv )
+int runDisquiet0413()
 {
     std::cout << "Disquiet 0413" << std::endl;
     Player p;
 
     auto makeNote = [&p](double len, double amp, double freq) {
-                        std::shared_ptr<Env> e( new ADSRHeldForTimeEnv( 0.07, 0.05, .9, 0.2, len, amp ));
-                        std::shared_ptr<Pitch> ptc(new ConstantPitch(freq));
-                        std::shared_ptr<PWMOsc> o(new PWMOsc());
+                        auto e = std::make_shared<ADSRHeldForTimeEnv>(0.07, 0.05, .9, 0.2, len, amp );
+                        auto ptc = std::make_shared<ConstantPitch>(freq);
+                        /*
+                          auto o = std::make_shared<UnisonPWMOsc>(4, 0.05 );
+                          o->setPitch(ptc);
+                        */
+                        auto o = std::make_shared<PWMOsc>();
                         o->setPitch(ptc);
 
-                        std::shared_ptr<LFOSin> lfo(new LFOSin( 8.0 ));
-                        std::shared_ptr<ModulatorBinder> b(new ModulatorBinder(lfo,
-                                                                               [o](double v) {
-                                                                                   auto npw = 0.5 + 0.3 * v;
-                                                                                   o->setPulseWidth(npw);
-                                                                               } ) );
-                        o->children.insert(b);
+                        auto lfo = std::make_shared<LFOSin>(8.0 );
+                        std::weak_ptr<PWMOsc> wo = o; // don't cause a cycle!
+                        auto b = std::make_shared<ModulatorBinder>(lfo,
+                                                                   [wo](double v) {
+                                                                       auto npw = 0.4 + 0.1 * v;
+                                                                       wo.lock()->setPulseWidth(npw);
+                                                                   } );
                         
-                        std::shared_ptr<Note> n(new Note( o, e ));
+                        o->children.insert(b);
+
+                        auto n = std::make_shared<Note>( o, e );
+
                         return n;
                     };
 
@@ -395,8 +506,8 @@ int main( int arcgc, char **argv )
     }
     #endif
 
-    p.addNoteAtTime( 0.0, makeNote( 1.8, 0.3, noteToFreq(48) ) );
-    // p.addNoteAtTime( 0.2, makeNote( 1.8, 0.3, noteToFreq(48 + 5) ) );
+    p.addNoteAtTime( 0.0, makeNote( 1.8, 0.3, noteToFreq(48-12) ) );
+    //p.addNoteAtTime( 0.2, makeNote( 1.8, 0.3, noteToFreq(48 + 5) ) );
 
     size_t nsamp = (size_t)( 2 * 2.5 * srate );
     double music[ nsamp ];
@@ -414,4 +525,17 @@ int main( int arcgc, char **argv )
     sf_write_float( of, &sfm[0], nsamp );
     sf_write_sync(of);
     sf_close(of);
+
+    for( auto pr : p.sequence )
+    {
+        pr.second->debugInfo();
+    }
+    return 0;
+}
+
+int main( int argc, char **argv )
+{
+    runDisquiet0413();
+    if( steppableCount != 0 )       std::cout << "*ERROR* you set up a cycle somewhere. Probably a modulator" << std::endl;
+    return 0;
 }
