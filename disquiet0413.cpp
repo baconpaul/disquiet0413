@@ -12,7 +12,7 @@
 */
 #include "sndfile.h"
 
-double srate = 44100;
+double srate = 44100 * 2;
 double stime = 1.0 / srate;
 
 static std::atomic<int> steppableCount;
@@ -164,12 +164,11 @@ struct Osc : public StereoSteppable
     }
 
     std::shared_ptr<Pitch> pitch;
-    float phase = 0;
+    float phase = 0, dphase = 0.01;
     virtual void step() override {
-        float dp = 0.01;
         if( pitch )
-            dp = pitch->dphase();
-        phase += dp;
+            dphase = pitch->dphase();
+        phase += dphase;
         if( phase > 1 ) {
             phase -= 1;
             rollPhase();
@@ -193,8 +192,7 @@ struct PWMOsc : public Osc {
     double pw = 0.5;
     double falloff = 0.2;
     bool secondHalf = false;
-    
-    virtual void setPulseWidth( double pw ) { this->pw = pw; }
+
     virtual double evaluateAtPhase(int chan) override {
         double vphase;
         double s;
@@ -215,6 +213,35 @@ struct PWMOsc : public Osc {
     }
     virtual void rollPhase() override { secondHalf = false; }
     virtual std::string className() override { return "PWMOsc"; }
+};
+
+struct ThreeOscFM : public Osc {
+    // 2 + 3 -> 1
+    double fmul1 = 3.0, famp1 = 3.0, fmul2 = 6.0, famp2 = 1.0;
+    double phase1, phase2;
+
+    virtual void step() override {
+        if( pitch )
+            dphase = pitch->dphase();
+
+        phase1 += dphase * fmul1;
+        if( phase1 > 1 ) phase1 -= 1;
+
+        phase2 += dphase * fmul2;
+        if( phase2 > 1 ) phase2 -= 1;
+
+        auto impfreq = dphase * srate * ( 1  + famp1 * sin(2.0 * M_PI * phase1) + famp2 * sin(2.0 * M_PI * phase2) );
+        auto impdphase = impfreq / srate;
+        phase += impdphase;
+        if( phase > 1 ) phase -= 1;
+        
+        valL = sin(2.0 * M_PI * phase);
+        valR = valL;
+    }
+    virtual double evaluateAtPhase(int c) override { return 0; } // skip this since I force it in step above
+
+    virtual bool isActive() override { return true; }
+    virtual std::string className() override { return "ThreeOscFM"; }
 };
 
 struct UnisonPWMOsc : public Osc {
@@ -701,14 +728,9 @@ int runDisquiet0413()
                              auto panR = std::make_shared<PanningMixer>(0.6);
                              panR->children.insert(oR);
 
-                             auto pithC = std::make_shared<ConstantPitch>(freq);
-                             auto oS = std::make_shared<SinOsc>();
-                             oS->setPitch(pithC);
-                             
                              auto o = std::make_shared<UniformMixer>();
                              o->children.insert(panR);
                              o->children.insert(panL);
-                             o->children.insert(oS);
                              
 
                              auto lfo = std::make_shared<LFOSin>(4.0);
@@ -716,7 +738,7 @@ int runDisquiet0413()
                              auto b = std::make_shared<ModulatorBinder>(lfo,
                                                                         [wo](double v) {
                                                                             auto npw = 0.5 + 0.05 * v;
-                                                                            wo.lock()->setPulseWidth(npw);
+                                                                            wo.lock()->pw = npw;
                                                                         } );
                         
                              oL->children.insert(b);
@@ -725,7 +747,7 @@ int runDisquiet0413()
                              auto bR = std::make_shared<ModulatorBinder>(lfo,
                                                                         [wr](double v) {
                                                                             auto npw = 0.5 - 0.05 * v;
-                                                                            wr.lock()->setPulseWidth(npw);
+                                                                            wr.lock()->pw = npw;
                                                                         } );
                         
                              oR->children.insert(bR);
@@ -743,8 +765,29 @@ int runDisquiet0413()
                                                                              }
                                  );
                              lpf->children.insert(lb);
+
+                             auto mix2 = std::make_shared<UniformMixer>();
+                             auto pithC = std::make_shared<ConstantPitch>(freq);
+                             auto oS = std::make_shared<ThreeOscFM>();
+                             oS->setPitch(pithC);
+                             auto fmenv = std::make_shared<ADSRHeldForTimeEnv>( 0.01, 0.1, 0.3, 0.4, len / 2, 1.0 );
+                             std::weak_ptr<ThreeOscFM> w3ow = oS;
+                             auto fmb = std::make_shared<ModulatorBinder>(fmenv,
+                                                                          [w3ow](double v)
+                                                                              {
+                                                                                  auto w3o = w3ow.lock();
+                                                                                  w3o->famp1 = 3.8 * v;
+                                                                                  w3o->famp2 = 1.2 * v;
+                                                                                  w3o->fmul1 = 3.0 + 0.1 * v;
+                                                                                  w3o->fmul2 = 5.95 + 0.1 * v;
+                                                                              }
+                                 );
+                             oS->children.insert(fmb);
+
+                             mix2->children.insert(lpf);
+                             mix2->children.insert(oS);
                              
-                             auto n = std::make_shared<Note>( lpf, e );
+                             auto n = std::make_shared<Note>( mix2, e );
 
                              return n;
                          };
