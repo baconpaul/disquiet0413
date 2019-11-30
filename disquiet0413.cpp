@@ -21,14 +21,14 @@ struct Steppable
 {
     Steppable() {
         steppableCount++;
-        std::cout << "Steppable ctor:  [" << steppableCount << "] [" << this << "]" << std::endl;
+        //std::cout << "Steppable ctor:  [" << steppableCount << "] [" << this << "]" << std::endl;
     }
     ~Steppable() {
         steppableCount--;
-        std::cout << "Steppable dtor:  [" << steppableCount << "] [" << this << "]" << std::endl;
+        //std::cout << "Steppable dtor:  [" << steppableCount << "] [" << this << "]" << std::endl;
         for( auto c : children )
         {
-            std::cout << "  - " << c.get() << " " << c.use_count() << " " << c->className() << std::endl;
+            //std::cout << "  - " << c.get() << " " << c.use_count() << " " << c->className() << std::endl;
         }
         children.clear();
     }
@@ -438,8 +438,10 @@ struct Note : public StereoSteppable
     virtual std::string className() override { return "Note"; }
 };
 
-struct Player {
+struct Sequencer {
     std::map<size_t, std::shared_ptr<Note>> sequence;
+    size_t rendered_until = 0;
+    std::unordered_set<std::shared_ptr<Note>> activeNotes;
 
     void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
         sequence[sample] = n;
@@ -450,15 +452,14 @@ struct Player {
     }
 
     void generateSamples( double *s, size_t nsamples ) {
-        std::unordered_set<std::shared_ptr<Note>> activeNotes;
-
         for( auto cs = 0; cs < nsamples; cs += 2 )
         {
-            auto maybenrenote = sequence.find(cs);
+            auto maybenrenote = sequence.find(rendered_until);
             if( maybenrenote != sequence.end() )
             {
                 activeNotes.insert( maybenrenote->second );
             }
+            rendered_until ++;
 
             for( auto n : activeNotes )
                 n->makeDirty();
@@ -491,22 +492,112 @@ double noteToFreq(int n)
     return f;
 }
 
+std::vector<std::tuple<int, double>> voicesTheme() {
+    std::vector<double> n = { 60, 3,
+               67, 1,
+               67, 4,
+               
+               65, 3,
+               74, 1,
+               74, 4,
+                 
+               72, 3,
+               68, 1,
+               70, 1,
+               72, 1,
+               74, 1,
+               76, 1,
+               
+               78, 3,
+               79, 1,
+               81, 4,
+               
+               83, 3,
+               72, 1,
+               72, 4,
+               
+               73, 3,
+               62, 1,
+               62, 4,
+
+               63, 3,
+                              52, 1,
+               54, 1,
+               56, 1,
+               58, 1,
+               60, 1,
+               
+               62, 3,
+               63, 1,
+                              64, 4,
+
+                              66, 4.5,
+                              60, .5,
+                              61, .5,
+                              62, .5,
+                              
+                              63, .5,
+                              64, .5,
+                              65, .5,
+                              66, .5,
+
+                              67, 2.5,
+                              58, .5,
+                              59, .5,
+                              60, .5,
+
+                              61, .5,
+                              62, .5,
+                              63, .5,
+                              64, .5,
+                              
+                              65, .5,
+                              66, .5,
+                              67, .5,
+                              68, .5,
+
+                              69, 3,
+                              64, 1,
+                              71, 3,
+                              64, 1,
+                              74, 8,
+
+                              72, 3,
+                              67, 1,
+                              67, 4,
+
+                              68, 3,
+                              63, 1,
+                              63, 4,
+
+                              64, 3,
+                              55, 1,
+                              57, 2,
+                              53, 2,
+
+                              43, 8
+    };
+
+    std::vector<std::tuple<int, double>> res;
+    for( auto i=0; i<n.size(); i += 2 )
+    {
+        res.push_back( std::make_tuple( n[i], 1.0 * n[i+1] ) );
+    }
+    return res;             
+}
+
 int runDisquiet0413()
 {
     std::cout << "Disquiet 0413" << std::endl;
-    Player p;
+    Sequencer p;
 
     auto makeNote = [&p](double len, double amp, double freq) {
                         auto e = std::make_shared<ADSRHeldForTimeEnv>(0.07, 0.05, .9, 0.2, len, amp );
                         auto ptc = std::make_shared<ConstantPitch>(freq);
-                        /*
-                          auto o = std::make_shared<UnisonPWMOsc>(4, 0.05 );
-                          o->setPitch(ptc);
-                        */
                         auto o = std::make_shared<PWMOsc>();
                         o->setPitch(ptc);
 
-                        auto lfo = std::make_shared<LFOSin>(8.0 );
+/*                        auto lfo = std::make_shared<LFOSin>(8.0 );
                         std::weak_ptr<PWMOsc> wo = o; // don't cause a cycle!
                         auto b = std::make_shared<ModulatorBinder>(lfo,
                                                                    [wo](double v) {
@@ -528,29 +619,35 @@ int runDisquiet0413()
                                                                         }
                             );
                         lpf->children.insert(lb);
-                          
+*/                        
                         
-                        auto n = std::make_shared<Note>( lpf, e );
+                        auto n = std::make_shared<Note>( o, e );
 
                         return n;
                     };
 
-    #if 0
-    auto scale = { 60, 62, 64, 65, 67, 69, 71, 72, 74 };
-    auto s = 0.0;
-    for(auto n : scale)
+    auto theme = voicesTheme();
+
+    size_t csample = 0;
+    double bpm = 126;
+    double secondsPerBeat = 60 / bpm;
+    double samplesPerBeat = secondsPerBeat * srate;
+    std::cout << "spb = " << samplesPerBeat << std::endl;
+    
+    for( auto n : theme )
     {
-        p.addNoteAtTime(s, makeNote( 0.5, 0.3, noteToFreq(n) ) );
-        s += 0.2;
+        auto midinote = std::get<0>(n);
+        auto dur = std::get<1>(n) / 2.0;
+        auto tdur = dur * secondsPerBeat;
+        auto sdur = dur * samplesPerBeat;
+
+        std::cout << "Note at Sample " << csample << " " << midinote << " " << tdur << std::endl;
+        p.addNoteAtSample(csample, makeNote( tdur * 0.8, 0.5, noteToFreq(midinote) ));
+        csample += sdur;
     }
-    #endif
-
-    p.addNoteAtTime( 0.0, makeNote( 1.8, 0.3, noteToFreq(48-12) ) );
-    //p.addNoteAtTime( 0.2, makeNote( 1.8, 0.3, noteToFreq(48 + 5) ) );
-
-    size_t nsamp = (size_t)( 2 * 2.5 * srate );
+    
+    size_t nsamp = srate * 2;
     double music[ nsamp ];
-    p.generateSamples(music, nsamp );
 
 
     SF_INFO sfinfo;
@@ -558,11 +655,16 @@ int runDisquiet0413()
     sfinfo.samplerate = srate;
     sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
     SNDFILE* of = sf_open("example.wav", SFM_WRITE, &sfinfo);
-    float sfm[ nsamp ];
-    for( auto i=0; i<nsamp; ++i )
-        sfm[i] = music[i];
-    sf_write_float( of, &sfm[0], nsamp );
-    sf_write_sync(of);
+
+    for( int i=0; i<32; ++i )
+    {
+        p.generateSamples(music, nsamp );
+        float sfm[ nsamp ];
+        for( auto i=0; i<nsamp; ++i )
+            sfm[i] = music[i];
+        sf_write_float( of, &sfm[0], nsamp );
+        sf_write_sync(of);
+    }
     sf_close(of);
 
     for( auto pr : p.sequence )
