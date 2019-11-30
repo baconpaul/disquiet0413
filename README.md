@@ -24,7 +24,9 @@ any of a variety of tools, like csound, or whatever. But it was fun and pedagogi
 for all the skills I've gained with the synth and DSP work I've been doing recently, and also to remember that the end
 goal is indeed music. 
 
-**put soundcloud embed here if I finish this**
+Hear the music here:
+
+https://soundcloud.com/baconpaul/thankful-for-c-14-disquiet0413
 
 Enjoy!
 
