@@ -244,62 +244,6 @@ struct ThreeOscFM : public Osc {
     virtual std::string className() override { return "ThreeOscFM"; }
 };
 
-struct UnisonPWMOsc : public Osc {
-    std::vector<std::shared_ptr<PWMOsc>> osces;
-    std::vector<double> pan;
-    int nUni;
-    double spread;
-
-    
-    UnisonPWMOsc( int nUni, double spread ) {
-        this->nUni = nUni;
-        this->spread = spread;
-        auto sphase = 1.0 / nUni;
-        pan.resize(nUni);
-        for( auto i=0; i<nUni; ++i )
-        {
-            osces.push_back( std::make_shared<PWMOsc>() );
-            osces[i]->phase = sphase * i;
-            pan[i] = sphase * ( i + 0.5 );
-        }
-    }
-    
-    virtual void step() override {
-        float dp = 0.01;
-        if( pitch )
-            dp = pitch->dphase();
-
-        // this is a bit inefficient
-        auto freq = dp * srate;
-        auto spreadfreq = freq * spread;
-        auto dfreq = spreadfreq * 2.0 / (nUni - 1);
-        float tvalL = 0;
-        float tvalR = 0;
-        for( auto i=0; i<nUni; ++i )
-        {
-            auto lfreq = freq + dfreq * i - spreadfreq;
-            auto dp = lfreq / srate;
-
-            osces[i]->phase += dp;
-            if( osces[i]->phase > 1 )
-                osces[i]->phase -= 1;
-
-            tvalL += pan[i] * osces[i]->evaluateAtPhase(0) / nUni;
-            tvalR += (1.0 - pan[i] ) * osces[i]->evaluateAtPhase(0) / nUni;
-
-
-        }
-        valL = tvalL;
-        valR = tvalR;
-    }
-
-    virtual double evaluateAtPhase(int c) override {
-        assert(false);
-    }
-
-    virtual std::string className() override { return "UnisonPWMOsc"; }
-};
-    
 /*
 ** Envelopes
 */
@@ -320,7 +264,7 @@ struct ConstantTimedEnv : public Env {
 struct ADSRHeldForTimeEnv : public Env {
     double a, d, s, r;
     double time, amp;
-    double currtime;
+    double currtime = 0;
     ADSRHeldForTimeEnv( double a, double d, double s, double r, double time, double amp ) : time(time), amp(amp), currtime(0),
                                                                                           a(a), d(d), s(s), r(r) {
     }
@@ -340,10 +284,14 @@ struct ADSRHeldForTimeEnv : public Env {
         {
             val = s;
         }
-        else
+        else if( currtime < time + r )
         {
             auto intoR = ( currtime - time ) / r; // ( 0 for release, 1 for end)
             val = s * ( 1 - intoR );
+        }
+        else
+        {
+            val = 0;
         }
         currtime += stime;
     }
@@ -440,12 +388,12 @@ struct LPFBiquad : BiquadFilter {
 };
 
 
-struct Note : public StereoSteppable
+struct VCA : public StereoSteppable
 {
     std::shared_ptr<StereoSteppable> source;
-    std::shared_ptr<Env> env;
-    Note( std::shared_ptr<StereoSteppable> isource,
-          std::shared_ptr<Env> ienvelope ) {
+    std::shared_ptr<Modulator> env;
+    VCA( std::shared_ptr<StereoSteppable> isource,
+          std::shared_ptr<Modulator> ienvelope ) {
         source = isource;
         env = ienvelope;
 
@@ -470,7 +418,7 @@ struct Note : public StereoSteppable
         return env->isActive();
     }
 
-    virtual std::string className() override { return "Note"; }
+    virtual std::string className() override { return "VCA"; }
 };
 
 struct UniformMixer : StereoSteppable {
@@ -485,6 +433,27 @@ struct UniformMixer : StereoSteppable {
         valR = tr;
     }
     virtual std::string className() override { return "UniformMixer"; }
+    virtual bool isActive() override { return true; } // this could be better obvs
+};
+
+struct WeightedMixer : StereoSteppable {
+    std::vector< std::pair< double, std::shared_ptr<StereoSteppable> > > subs;
+    void addInput( double w,  std::shared_ptr<StereoSteppable> s ) {
+        subs.push_back(std::make_pair(w, s));
+        children.insert(s);
+    }
+    
+    virtual void step() override {
+        double tr = 0, tl = 0;
+        for( auto c : subs )
+        {
+            tl += c.first * c.second->value(0);
+            tr += c.first * c.second->value(1);
+        }
+        valL = tl;
+        valR = tr;
+    }
+    virtual std::string className() override { return "WeightedMixer"; }
     virtual bool isActive() override { return true; } // this could be better obvs
 };
 
@@ -520,8 +489,48 @@ struct PanningMixer : StereoSteppable {
 
 };
 
+struct DigitalDelay : StereoSteppable {
+    double fb = 0.2;
+    size_t nsamp;
+    double *buffer;
+    size_t pos;
+
+    DigitalDelay(size_t s) {
+        nsamp = s;
+        buffer = new double[2*nsamp];
+        for( int i=0; i<2*nsamp; ++i )
+            buffer[i] = 0.0;
+        pos = 0;
+    }
+    ~DigitalDelay() {
+        delete[] buffer;
+    }
+    virtual void step() override {
+        auto il = pos * 2;
+        auto ir = pos * 2 + 1;
+        auto fbl = buffer[il];
+        auto fbr = buffer[ir];
+
+        if( children.size() > 1 )
+            std::cout << "Please only add one child to a delay thanks. Use a mixer first" << std::endl;
+
+        auto k = *(children.begin());
+        valL = buffer[il];
+        valR = buffer[ir];
+        
+        buffer[il] = ( k->value(0) + fb * fbl );
+        buffer[ir] = ( k->value(1) + fb * fbr );
+
+        pos++;
+        if( pos >= nsamp ) pos = 0;
+    }
+    virtual bool isActive() override { return true; };
+    virtual std::string className() override { return "Digital Delay"; }
+    
+};
+
 struct SequencePlayer : StereoSteppable {
-    std::map<size_t, std::shared_ptr<Note>> sequence;
+    std::map<size_t, std::shared_ptr<StereoSteppable>> sequence;
     size_t rendered_until = 0;
 
     std::shared_ptr<StereoSteppable> notePlayer;
@@ -531,10 +540,10 @@ struct SequencePlayer : StereoSteppable {
         children.insert(notePlayer);
     }
     
-    void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
+    void addNoteAtSample(size_t sample, std::shared_ptr<StereoSteppable> n) {
         sequence[sample] = n;
     }
-    void addNoteAtTime(double time, std::shared_ptr<Note> n) {
+    void addNoteAtTime(double time, std::shared_ptr<StereoSteppable> n) {
         auto sample = (size_t)( time * srate );
         sequence[sample] = n;
     }
@@ -597,7 +606,11 @@ struct Renderer {
             generateSamples( music, nsamp );
             float sfm[ nsamp ];
             for( auto i=0; i<nsamp; ++i )
+            {
                 sfm[i] = music[i];
+                if( sfm[i] > 1.0 || sfm[i] < -1.0 )
+                    std::cout << "CLIP at sample " << i << " " << sfm[i] << std::endl;
+            }
             sf_write_float( of, &sfm[0], nsamp );
             sf_write_sync(of);
         }
@@ -607,103 +620,103 @@ struct Renderer {
     }
 };
 
-double noteToFreq(int n)
+double noteToFreq(double n)
 {
     auto n0 = n - 69; // so 440 == 0
     auto f = 440.0 * pow( 2.0, n0 / 12.0 );
     return f;
 }
 
-std::vector<std::tuple<int, double>> voicesTheme() {
-    std::vector<double> n = { 60, 3,
-                              67, 1,
-                              67, 4,
+std::vector<std::tuple<int, double, double>> voicesTheme() {
+    std::vector<double> n = { 60, 3, 0.8,
+                              67, 1, 0.9,
+                              67, 4, 0.7,
                               
-                              65, 3,
-                              74, 1,
-                              74, 4,
+                              65, 3, 0.8,
+                              74, 1, 0.9,
+                              74, 4, 0.7,
                               
-                              72, 3,
-                              68, 1,
-                              70, 1,
-                              72, 1,
-                              74, 1,
-                              76, 1,
+                              72, 3, 0.8,
+                              68, 1, 0.9,
+                              70, 1, 0.9,
+                              72, 1, 0.9,
+                              74, 1, 0.9,
+                              76, 1, 0.9,
                               
-                              78, 3,
-                              79, 1,
-                              81, 4,
+                              78, 3, 0.8,
+                              79, 1, 0.9,
+                              81, 4, 0.7,
                               
-                              83, 3,
-                              72, 1,
-                              72, 4,
+                              83, 3, 0.8,
+                              72, 1, 0.9,
+                              72, 4, 0.7,
                               
-                              73, 3,
-                              62, 1,
-                              62, 4,
+                              73, 3, 0.8,
+                              62, 1, 0.9,
+                              62, 4, 0.7,
                               
-                              63, 3,
-                              52, 1,
-                              54, 1,
-                              56, 1,
-                              58, 1,
-                              60, 1,
+                              63, 3, 0.8,
+                              52, 1, 0.9,
+                              54, 1, 0.9,
+                              56, 1, 0.9,
+                              58, 1, 0.9,
+                              60, 1, 0.9,
                               
-                              62, 3,
-                              63, 1,
-                              64, 4,
+                              62, 3, 0.8,
+                              63, 1, 0.9,
+                              64, 4, 0.7,
                               
-                              66, 4.5,
-                              60, .5,
-                              61, .5,
-                              62, .5,
+                              66, 4.5, 0.7,
+                              60, .5, 0.8,
+                              61, .5, 0.8,
+                              62, .5, 0.8,
                               
-                              63, .5,
-                              64, .5,
-                              65, .5,
-                              66, .5,
+                              63, .5, 0.8,
+                              64, .5, 0.8,
+                              65, .5, 0.8,
+                              66, .5, 0.8,
                               
-                              67, 2.5,
-                              58, .5,
-                              59, .5,
-                              60, .5,
+                              67, 2.5, 0.8,
+                              58, .5, 0.8,
+                              59, .5, 0.8,
+                              60, .5, 0.8,
 
-                              61, .5,
-                              62, .5,
-                              63, .5,
-                              64, .5,
+                              61, .5, 0.8,
+                              62, .5, 0.8,
+                              63, .5, 0.8,
+                              64, .5, 0.8,
                               
-                              65, .5,
-                              66, .5,
-                              67, .5,
-                              68, .5,
+                              65, .5, 0.8,
+                              66, .5, 0.8,
+                              67, .5, 0.8,
+                              68, .5, 0.8,
 
-                              69, 3,
-                              64, 1,
-                              71, 3,
-                              64, 1,
-                              74, 8,
+                              69, 3, 0.8,
+                              64, 1, 0.9,
+                              71, 3, 0.8,
+                              64, 1, 0.9,
+                              74, 8, 0.8,
 
-                              72, 3,
-                              67, 1,
-                              67, 4,
+                              72, 3, 0.8,
+                              67, 1, 0.9,
+                              67, 4, 0.7,
 
-                              68, 3,
-                              63, 1,
-                              63, 4,
+                              68, 3, 0.8,
+                              63, 1, 0.9,
+                              63, 4, 0.7,
 
-                              64, 3,
-                              55, 1,
-                              57, 2,
-                              53, 2,
+                              64, 3, 0.8,
+                              55, 1, 0.9,
+                              57, 2, 0.8,
+                              53, 2, 0.8,
 
-                              43, 8
+                              43, 8, 0.8
     };
 
-    std::vector<std::tuple<int, double>> res;
-    for( auto i=0; i<n.size(); i += 2 )
+    std::vector<std::tuple<int, double, double>> res;
+    for( auto i=0; i<n.size(); i += 3 )
     {
-        res.push_back( std::make_tuple( n[i], 1.0 * n[i+1] ) );
+        res.push_back( std::make_tuple( n[i], 1.0 * n[i+1], n[i+2] ) );
     }
     return res;             
 }
@@ -787,7 +800,7 @@ int runDisquiet0413()
                              mix2->children.insert(lpf);
                              mix2->children.insert(oS);
                              
-                             auto n = std::make_shared<Note>( mix2, e );
+                             auto n = std::make_shared<VCA>( mix2, e );
 
                              return n;
                          };
@@ -804,14 +817,62 @@ int runDisquiet0413()
     {
         auto midinote = std::get<0>(n);
         auto dur = std::get<1>(n) / 2.0;
+        auto vel = std::get<2>(n);
         auto tdur = dur * secondsPerBeat;
         auto sdur = dur * samplesPerBeat;
 
-        p->addNoteAtSample(csample, makeThemeNote( tdur * 0.8, 0.5, noteToFreq(midinote) ));
+        p->addNoteAtSample(csample, makeThemeNote( tdur * 0.8, 0.6 * vel, noteToFreq(midinote) ));
         csample += sdur;
     }
 
-    Renderer r(p);
+    // OK so now build some fx. lets delay a slightly LPFed version of the main theme
+    auto del = std::make_shared<DigitalDelay>( samplesPerBeat / 2 );
+    auto mainlpf = std::make_shared<LPFBiquad>();
+    mainlpf->setFreq(3600);
+    mainlpf->setResonance(0.8);
+    mainlpf->setInput(p);
+    del->children.insert(mainlpf);
+    del->fb = 0.4;
+
+    // Lets hold a pulsing drone beneath the whole thing
+    auto dmix = std::make_shared<WeightedMixer>();
+    for( int i=0; i<3; ++i )
+    {
+        auto fdiff = ( i - 1.0 ) * 0.1;
+        auto pan   = ( 1 - 1.0 ) * 0.7;
+        
+        auto drone = std::make_shared<PWMOsc>();
+        auto dronePitch = std::make_shared<ConstantPitch>(noteToFreq( 60 - 12 - 12 - 12 + 7 + fdiff ));
+        drone->setPitch(dronePitch);
+        auto pmix = std::make_shared<PanningMixer>(pan);
+        pmix->children.insert(drone);
+        dmix->addInput( 0.3, pmix );
+    }
+
+    auto dlpf = std::make_shared<LPFBiquad>();
+    dlpf->setFreq(2000);
+    dlpf->setResonance(0.1);
+    dlpf->setInput(dmix);
+
+    auto dlpfmod = std::make_shared<LFOSin>( 1.27 );
+    std::weak_ptr<LPFBiquad> wdlpf = dlpf;
+    auto dlpfmodb = std::make_shared<ModulatorBinder>(dlpfmod,
+                                                      [wdlpf](double v)
+                                                          {
+                                                              wdlpf.lock()->setFreq( 1700 + 300 * v );
+                                                          }
+        );
+    dlpf->children.insert(dlpfmodb);
+    auto droneEnv = std::make_shared<ADSRHeldForTimeEnv>( 0.1, 0.05, 1.0, 1.0, 30, 1.0 );
+    auto droneFinal = std::make_shared<VCA>( dlpf, droneEnv );
+
+    auto mix = std::make_shared<WeightedMixer>();
+    float scale = 0.5;
+    mix->addInput( scale, p );
+    mix->addInput( scale * 0.6, del );
+    mix->addInput( scale * 0.4, droneFinal );
+    
+    Renderer r(mix);
     r.writeToFile( "example.wav", 32 );
     return 0;
 }

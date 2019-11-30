@@ -1,5 +1,5 @@
 dq0413:	disquiet0413.cpp
-	clang++ -std=c++14 -Werror -o dq0413 disquiet0413.cpp -lsndfile
+	clang++ -O3 -std=c++14 -Werror -o dq0413 disquiet0413.cpp -lsndfile
 
 run:	dq0413
 	./dq0413
