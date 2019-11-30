@@ -402,6 +402,7 @@ struct LPFBiquad : BiquadFilter {
         a[2] = ( 1.0 - alpha ) / a0;
 
     }
+    virtual std::string className() override { return "LPFBiquad"; }
 };
 
 
@@ -591,40 +592,40 @@ int runDisquiet0413()
     std::cout << "Disquiet 0413" << std::endl;
     Sequencer p;
 
-    auto makeNote = [&p](double len, double amp, double freq) {
-                        auto e = std::make_shared<ADSRHeldForTimeEnv>(0.07, 0.05, .9, 0.2, len, amp );
-                        auto ptc = std::make_shared<ConstantPitch>(freq);
-                        auto o = std::make_shared<PWMOsc>();
-                        o->setPitch(ptc);
+    auto makeThemeNote = [&p](double len, double amp, double freq) {
+                             auto e = std::make_shared<ADSRHeldForTimeEnv>(0.07, 0.05, .9, 0.2, len, amp );
+                             auto ptc = std::make_shared<ConstantPitch>(freq);
+                             auto o = std::make_shared<PWMOsc>();
+                             o->setPitch(ptc);
 
-/*                        auto lfo = std::make_shared<LFOSin>(8.0 );
-                        std::weak_ptr<PWMOsc> wo = o; // don't cause a cycle!
-                        auto b = std::make_shared<ModulatorBinder>(lfo,
-                                                                   [wo](double v) {
-                                                                       auto npw = 0.4 + 0.1 * v;
-                                                                       wo.lock()->setPulseWidth(npw);
-                                                                   } );
+                             auto lfo = std::make_shared<LFOSin>(4.0);
+                             std::weak_ptr<PWMOsc> wo = o; // don't cause a cycle!
+                             auto b = std::make_shared<ModulatorBinder>(lfo,
+                                                                        [wo](double v) {
+                                                                            auto npw = 0.5 + 0.05 * v;
+                                                                            wo.lock()->setPulseWidth(npw);
+                                                                        } );
                         
-                        o->children.insert(b);
+                             o->children.insert(b);
 
-                        auto lpf = std::make_shared<LPFBiquad>();
-                        lpf->setFreq(4000);
-                        lpf->setResonance(0.7);
-                        lpf->setInput(o);
-                        std::weak_ptr<LPFBiquad> wlpf = lpf;
-                        auto lb = std::make_shared<ModulatorBinder>(lfo,
-                                                                    [wlpf](double v)
-                                                                        {
-                                                                            wlpf.lock()->setFreq(4000 + v * 3000 );
-                                                                        }
-                            );
-                        lpf->children.insert(lb);
-*/                        
-                        
-                        auto n = std::make_shared<Note>( o, e );
+                             auto fenv = std::make_shared<ADSRHeldForTimeEnv>( 0.05, 0.1, 0.1, 0.2, len, 1.0 );
+                             auto lpf = std::make_shared<LPFBiquad>();
+                             lpf->setFreq(1000);
+                             lpf->setResonance(0.2);
+                             lpf->setInput(o);
+                             std::weak_ptr<LPFBiquad> wlpf = lpf;
+                             auto lb = std::make_shared<ModulatorBinder>(fenv,
+                                                                         [wlpf](double v)
+                                                                             {
+                                                                                 wlpf.lock()->setFreq(3000 + v * 1000 );
+                                                                             }
+                                 );
+                             lpf->children.insert(lb);
+                             
+                             auto n = std::make_shared<Note>( lpf, e );
 
-                        return n;
-                    };
+                             return n;
+                         };
 
     auto theme = voicesTheme();
 
@@ -642,7 +643,7 @@ int runDisquiet0413()
         auto sdur = dur * samplesPerBeat;
 
         std::cout << "Note at Sample " << csample << " " << midinote << " " << tdur << std::endl;
-        p.addNoteAtSample(csample, makeNote( tdur * 0.8, 0.5, noteToFreq(midinote) ));
+        p.addNoteAtSample(csample, makeThemeNote( tdur * 0.8, 0.5, noteToFreq(midinote) ));
         csample += sdur;
     }
     
