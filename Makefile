@@ -3,4 +3,8 @@ dq0413:	disquiet0413.cpp
 
 run:	dq0413
 	./dq0413
-	afplay example.wav
+	afplay disquiet0413.wav
+
+clean:
+	rm -f ./dq0413
+	rm -f ./disquiet0413.wav
