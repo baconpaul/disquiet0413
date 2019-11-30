@@ -170,11 +170,16 @@ struct Osc : public StereoSteppable
         if( pitch )
             dp = pitch->dphase();
         phase += dp;
-        if( phase > 1 ) phase -= 1;
+        if( phase > 1 ) {
+            phase -= 1;
+            rollPhase();
+        }
+               
         valL = evaluateAtPhase(0);
         valR = evaluateAtPhase(1);
     }
 
+    virtual void rollPhase() { }
     virtual double evaluateAtPhase(int chan) = 0;
 };
 
@@ -187,18 +192,20 @@ struct SinOsc : public Osc {
 struct PWMOsc : public Osc {
     double pw = 0.5;
     double falloff = 0.2;
+    bool secondHalf = false;
     
     virtual void setPulseWidth( double pw ) { this->pw = pw; }
     virtual double evaluateAtPhase(int chan) override {
         double vphase;
         double s;
-        if( phase < pw )
+        if( phase < pw && ! secondHalf )
         {
             vphase = phase / pw;
             s = 1;
         }
         else
         {
+            secondHalf = true;
             vphase = (phase - pw) / ( 1.0 - pw );
             s = -1;
         }
@@ -206,7 +213,7 @@ struct PWMOsc : public Osc {
         
         return res;
     }
-
+    virtual void rollPhase() override { secondHalf = false; }
     virtual std::string className() override { return "PWMOsc"; }
 };
 
@@ -439,11 +446,64 @@ struct Note : public StereoSteppable
     virtual std::string className() override { return "Note"; }
 };
 
+struct UniformMixer : StereoSteppable {
+    virtual void step() override {
+        double tr = 0, tl = 0;
+        for( auto c : children )
+        {
+            tl += c->value(0);
+            tr += c->value(1);
+        }
+        valL = tl;
+        valR = tr;
+    }
+    virtual std::string className() override { return "UniformMixer"; }
+    virtual bool isActive() override { return true; } // this could be better obvs
+};
+
+struct PanningMixer : StereoSteppable {
+    double pan;
+    PanningMixer( double pan ) { // -1 move all left; 0 no change; 1 move all right
+        this->pan = pan;
+    }
+
+    virtual void step() override {
+        double tr = 0, tl = 0;
+        for( auto c : children )
+        {
+            auto l = c->value(0);
+            auto r = c->value(1);
+
+            if( pan < 0 )
+            {
+                tl += l + r * (-pan);
+                tr += r * ( 1 + pan);
+            }
+            else
+            {
+                tl += l * ( 1 - pan );
+                tr += r + l * pan;
+            }
+        }
+        valL = tl;
+        valR = tr;
+    }
+    virtual std::string className() override { return "UniformMixer"; }
+    virtual bool isActive() override { return true; } // this could be better obvs
+
+};
+
 struct Sequencer {
     std::map<size_t, std::shared_ptr<Note>> sequence;
     size_t rendered_until = 0;
-    std::unordered_set<std::shared_ptr<Note>> activeNotes;
 
+    std::shared_ptr<StereoSteppable> notePlayer;
+
+    Sequencer() {
+        notePlayer = std::make_shared<UniformMixer>();
+    }
+        
+    
     void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
         sequence[sample] = n;
     }
@@ -458,30 +518,22 @@ struct Sequencer {
             auto maybenrenote = sequence.find(rendered_until);
             if( maybenrenote != sequence.end() )
             {
-                activeNotes.insert( maybenrenote->second );
+                notePlayer->children.insert( maybenrenote->second );
             }
             rendered_until ++;
 
-            for( auto n : activeNotes )
-                n->makeDirty();
-            for( auto n : activeNotes )
-                n->stepIfDirty();
+            notePlayer->makeDirty();
+            notePlayer->stepIfDirty();
+            
+            s[cs] = notePlayer->value(0);
+            s[cs+1] = notePlayer->value(1);
 
-            double resL = 0, resR = 0;
-            for( auto n : activeNotes )
-            {
-                resL += n->value(0);
-                resR += n->value(1);
-            }
-            s[cs] = resL;
-            s[cs+1] = resR;
-
-            std::unordered_set<std::shared_ptr<Note>> del;
-            for( auto n : activeNotes )
+            std::unordered_set<std::shared_ptr<Steppable>> del;
+            for( auto n : notePlayer->children )
                 if( ! n->isActive() )
                     del.insert( n );
             for( auto n : del )
-                activeNotes.erase(n);
+                notePlayer->children.erase(n);
         }
     }
 };
@@ -594,19 +646,47 @@ int runDisquiet0413()
 
     auto makeThemeNote = [&p](double len, double amp, double freq) {
                              auto e = std::make_shared<ADSRHeldForTimeEnv>(0.07, 0.05, .9, 0.2, len, amp );
-                             auto ptc = std::make_shared<ConstantPitch>(freq);
-                             auto o = std::make_shared<PWMOsc>();
-                             o->setPitch(ptc);
+                             auto ptcL = std::make_shared<ConstantPitch>(freq * 0.99);
+                             auto oL = std::make_shared<PWMOsc>();
+                             oL->falloff = 0.8;
+                             oL->setPitch(ptcL);
+                             auto panL = std::make_shared<PanningMixer>(-0.6);
+                             panL->children.insert(oL);
+                             
+                             auto ptcR = std::make_shared<ConstantPitch>(freq * 1.01);
+                             auto oR = std::make_shared<PWMOsc>();
+                             oR->setPitch(ptcR);
+                             auto panR = std::make_shared<PanningMixer>(0.6);
+                             panR->children.insert(oR);
+
+                             auto pithC = std::make_shared<ConstantPitch>(freq);
+                             auto oS = std::make_shared<SinOsc>();
+                             oS->setPitch(pithC);
+                             
+                             auto o = std::make_shared<UniformMixer>();
+                             o->children.insert(panR);
+                             o->children.insert(panL);
+                             o->children.insert(oS);
+                             
 
                              auto lfo = std::make_shared<LFOSin>(4.0);
-                             std::weak_ptr<PWMOsc> wo = o; // don't cause a cycle!
+                             std::weak_ptr<PWMOsc> wo = oL; // don't cause a cycle!
                              auto b = std::make_shared<ModulatorBinder>(lfo,
                                                                         [wo](double v) {
                                                                             auto npw = 0.5 + 0.05 * v;
                                                                             wo.lock()->setPulseWidth(npw);
                                                                         } );
                         
-                             o->children.insert(b);
+                             oL->children.insert(b);
+
+                             std::weak_ptr<PWMOsc> wr = oR; // don't cause a cycle!
+                             auto bR = std::make_shared<ModulatorBinder>(lfo,
+                                                                        [wr](double v) {
+                                                                            auto npw = 0.5 - 0.05 * v;
+                                                                            wr.lock()->setPulseWidth(npw);
+                                                                        } );
+                        
+                             oR->children.insert(bR);
 
                              auto fenv = std::make_shared<ADSRHeldForTimeEnv>( 0.05, 0.1, 0.1, 0.2, len, 1.0 );
                              auto lpf = std::make_shared<LPFBiquad>();
@@ -615,9 +695,9 @@ int runDisquiet0413()
                              lpf->setInput(o);
                              std::weak_ptr<LPFBiquad> wlpf = lpf;
                              auto lb = std::make_shared<ModulatorBinder>(fenv,
-                                                                         [wlpf](double v)
+                                                                         [wlpf, freq](double v)
                                                                              {
-                                                                                 wlpf.lock()->setFreq(3000 + v * 1000 );
+                                                                                 wlpf.lock()->setFreq(freq * 3 + v * 1000 );
                                                                              }
                                  );
                              lpf->children.insert(lb);
