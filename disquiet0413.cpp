@@ -493,16 +493,16 @@ struct PanningMixer : StereoSteppable {
 
 };
 
-struct Sequencer {
+struct SequencePlayer : StereoSteppable {
     std::map<size_t, std::shared_ptr<Note>> sequence;
     size_t rendered_until = 0;
 
     std::shared_ptr<StereoSteppable> notePlayer;
 
-    Sequencer() {
+    SequencePlayer() {
         notePlayer = std::make_shared<UniformMixer>();
+        children.insert(notePlayer);
     }
-        
     
     void addNoteAtSample(size_t sample, std::shared_ptr<Note> n) {
         sequence[sample] = n;
@@ -512,29 +512,71 @@ struct Sequencer {
         sequence[sample] = n;
     }
 
+    virtual void step() override {
+        auto maybenrenote = sequence.find(rendered_until);
+        if( maybenrenote != sequence.end() )
+        {
+            notePlayer->children.insert( maybenrenote->second );
+        }
+        rendered_until ++;
+        
+        valL = notePlayer->value(0);
+        valR = notePlayer->value(1);
+
+        std::unordered_set<std::shared_ptr<Steppable>> del;
+        for( auto n : notePlayer->children )
+            if( ! n->isActive() )
+                del.insert( n );
+        for( auto n : del )
+            notePlayer->children.erase(n);
+    }
+
+    virtual bool isActive() override { return true; }
+    virtual std::string className() override { return "Sequence Player"; }
+};
+
+struct Renderer {
+    std::shared_ptr<StereoSteppable> source;
+    Renderer(std::shared_ptr<StereoSteppable> isource) {
+        source = isource;
+    }
+
     void generateSamples( double *s, size_t nsamples ) {
         for( auto cs = 0; cs < nsamples; cs += 2 )
         {
-            auto maybenrenote = sequence.find(rendered_until);
-            if( maybenrenote != sequence.end() )
-            {
-                notePlayer->children.insert( maybenrenote->second );
-            }
-            rendered_until ++;
-
-            notePlayer->makeDirty();
-            notePlayer->stepIfDirty();
-            
-            s[cs] = notePlayer->value(0);
-            s[cs+1] = notePlayer->value(1);
-
-            std::unordered_set<std::shared_ptr<Steppable>> del;
-            for( auto n : notePlayer->children )
-                if( ! n->isActive() )
-                    del.insert( n );
-            for( auto n : del )
-                notePlayer->children.erase(n);
+            source->makeDirty();
+            source->stepIfDirty();
+            s[cs] = source->value(0);
+            s[cs+1] = source->value(1);
         }
+    }
+
+    void writeToFile( std::string fname, int nSeconds ) {
+        size_t nsamp = srate * 2;
+        double music[ nsamp ];
+
+
+        SF_INFO sfinfo;
+        sfinfo.channels = 2;
+        sfinfo.samplerate = srate;
+        sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+        SNDFILE* of = sf_open(fname.c_str(), SFM_WRITE, &sfinfo);
+
+        std::cout << "Rendering source to file '" << fname << "'" << std::endl;
+        
+        for( int i=0; i<nSeconds; ++i )
+        {
+            std::cout << "  Rendering second " << std::setw(3) << i << "/" << nSeconds << std::endl;
+            generateSamples( music, nsamp );
+            float sfm[ nsamp ];
+            for( auto i=0; i<nsamp; ++i )
+                sfm[i] = music[i];
+            sf_write_float( of, &sfm[0], nsamp );
+            sf_write_sync(of);
+        }
+        std::cout << "Rendering complete" << std::endl;
+        sf_close(of);
+
     }
 };
 
@@ -642,7 +684,7 @@ std::vector<std::tuple<int, double>> voicesTheme() {
 int runDisquiet0413()
 {
     std::cout << "Disquiet 0413" << std::endl;
-    Sequencer p;
+    auto p = std::make_shared<SequencePlayer>();
 
     auto makeThemeNote = [&p](double len, double amp, double freq) {
                              auto e = std::make_shared<ADSRHeldForTimeEnv>(0.07, 0.05, .9, 0.2, len, amp );
@@ -722,36 +764,12 @@ int runDisquiet0413()
         auto tdur = dur * secondsPerBeat;
         auto sdur = dur * samplesPerBeat;
 
-        std::cout << "Note at Sample " << csample << " " << midinote << " " << tdur << std::endl;
-        p.addNoteAtSample(csample, makeThemeNote( tdur * 0.8, 0.5, noteToFreq(midinote) ));
+        p->addNoteAtSample(csample, makeThemeNote( tdur * 0.8, 0.5, noteToFreq(midinote) ));
         csample += sdur;
     }
-    
-    size_t nsamp = srate * 2;
-    double music[ nsamp ];
 
-
-    SF_INFO sfinfo;
-    sfinfo.channels = 2;
-    sfinfo.samplerate = srate;
-    sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
-    SNDFILE* of = sf_open("example.wav", SFM_WRITE, &sfinfo);
-
-    for( int i=0; i<32; ++i )
-    {
-        p.generateSamples(music, nsamp );
-        float sfm[ nsamp ];
-        for( auto i=0; i<nsamp; ++i )
-            sfm[i] = music[i];
-        sf_write_float( of, &sfm[0], nsamp );
-        sf_write_sync(of);
-    }
-    sf_close(of);
-
-    for( auto pr : p.sequence )
-    {
-        pr.second->debugInfo();
-    }
+    Renderer r(p);
+    r.writeToFile( "example.wav", 32 );
     return 0;
 }
 
